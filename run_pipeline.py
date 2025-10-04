@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from src.etl import fetch_esios, save_raw_parquet
+from src.etl import fetch_esios, normalize_datetime, save_raw_parquet
 import os
 
 def main():
@@ -22,6 +22,7 @@ def main():
     if df.empty:
         print("No data returned.")
     else:
+        df = normalize_datetime(df)
         print(df.head())
         save_raw_parquet(df, INDICATOR, start, end)
 

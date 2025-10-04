@@ -47,3 +47,34 @@ def save_raw_parquet(df: pd.DataFrame, indicator_id: int, start: datetime, end: 
 def load_local_csv(path):
     logger.info("Loading local CSV fallback: %s", path)
     return pd.read_csv(path, parse_dates=["datetime"])
+
+# Normalización de datetime (timezone UTC)
+def normalize_datetime(df: pd.DataFrame, col: str = "datetime") -> pd.DataFrame:
+    """
+    Normalize a datetime column to UTC.
+    - If column is not datetime, convert to datetime.
+    - If datetime values are tz-aware, convert to UTC.
+    - If naive (no tz), assume local Spain timezone (Europe/Madrid) then convert to UTC.
+    Returns a sorted dataframe with reset index.
+    """
+    if col not in df.columns:
+        raise ValueError(f"Column '{col}' not in dataframe")
+
+    # Ensure datetime dtype
+    if not pd.api.types.is_datetime64_any_dtype(df[col]):
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    # Drop rows where datetime conversion failed
+    if df[col].isna().any():
+        logging.warning("Some datetime values could not be parsed and will be dropped")
+        df = df.dropna(subset=[col])
+
+    # If tz-aware, convert directly to UTC
+    if df[col].dt.tz is not None:
+        df[col] = df[col].dt.tz_convert("UTC")
+    else:
+        # Assume the naive timestamps are in Spain local time and localize then convert to UTC
+        df[col] = df[col].dt.tz_localize("Europe/Madrid").dt.tz_convert("UTC")
+
+    df = df.sort_values(col).reset_index(drop=True)
+    return df
