@@ -5,7 +5,7 @@ import os
 def main():
     # UTC para reproducibilidad; ESIOS sirve datos horario con timezone
     end = datetime.utcnow()
-    start = end - timedelta(days=7)
+    start = end - timedelta(days=21)
     INDICATOR = 1293  # demanda realizada
     try:
         df = fetch_esios(INDICATOR, start, end)
