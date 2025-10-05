@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import pandas as pd
 import numpy as np
 import logging
@@ -7,6 +7,48 @@ import logging
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def resample_to_hourly(df: pd.DataFrame, datetime_col: str = "datetime", value_col: str = "target",
+                       how: str = "mean") -> pd.DataFrame:
+    """
+    Aggregate high-frequency data to hourly resolution.
+    how: aggregation function to apply ('mean','median','sum','max','min').
+    Returns DataFrame with one row per hour (tz-aware UTC).
+    """
+    df = df.copy()
+    # Ensure datetime and UTC tz
+    df[datetime_col] = pd.to_datetime(df[datetime_col], utc=True)
+    df = df.set_index(datetime_col)
+
+    # Choose aggregation
+    if how not in {"mean", "median", "sum", "max", "min"}:
+        raise ValueError("how must be one of mean/median/sum/max/min")
+
+    agg = getattr(df[value_col].resample("h"), how)()
+
+    # After resampling, agg is a Series indexed by hourly timestamps (tz-aware UTC)
+    agg = agg.reset_index().rename(columns={datetime_col: "datetime", value_col: value_col})
+    return agg
+
+def partial_hour_features(raw_df: pd.DataFrame, datetime_col: str = "datetime", value_col: str = "target") -> Dict[str, float]:
+    """
+    Compute features from the partial hour between the last complete hour and last observed timestamp.
+    Returns dictionary e.g. {'partial_count': n, 'partial_mean': x, 'partial_std': y, 'last_obs': z}
+    If no partial data (last sample at exact hour), returns zeros/NaN accordingly.
+    """
+    df = raw_df.copy()
+    df[datetime_col] = pd.to_datetime(df[datetime_col], utc=True)
+    last_ts = df[datetime_col].max()
+    last_complete = last_ts.floor("H")
+    partial = df[(df[datetime_col] > last_complete) & (df[datetime_col] <= last_ts)]
+    if partial.empty:
+        return {"partial_count": 0, "partial_mean": np.nan, "partial_std": np.nan, "last_obs": np.nan}
+    return {
+        "partial_count": int(len(partial)),
+        "partial_mean": float(partial[value_col].mean()),
+        "partial_std": float(partial[value_col].std(ddof=0)) if len(partial)>1 else 0.0,
+        "last_obs": float(partial[value_col].iloc[-1])
+    }
 
 def ensure_hourly_index(df: pd.DataFrame, datetime_col: str = "datetime", value_col: str = "target",
                         method_fill: Optional[str] = "ffill") -> pd.DataFrame:
@@ -102,46 +144,58 @@ def build_features_pipeline(raw_df: pd.DataFrame,
                             value_col: str = "target",
                             lags: Optional[List[int]] = None,
                             rolling_windows: Optional[List[int]] = None,
-                            fill_method: str = "ffill") -> pd.DataFrame:
+                            fill_method: str = "ffill",
+                            min_train_rows: int = 48) -> pd.DataFrame:
     """
-    Orchestrates the feature creation:
-    - enforce hourly index & fill
-    - create lags (only those that make sense)
-    - create rolling features
-    - add time features
-    - drop initial rows deterministically based on the max valid lag (safer than dropna)
+    Build features robustly:
+    - optionally keep only exact-hour rows
+    - ensure hourly index
+    - dynamically choose valid lags so that after dropping first max_lag rows
+      we still keep at least `min_train_rows` rows for training
     """
     if lags is None:
         lags = [1, 24, 168]
     if rolling_windows is None:
         rolling_windows = [3, 24, 168]
 
-    df = ensure_hourly_index(raw_df, method_fill=fill_method)
+    df_in = raw_df.copy()
+
+    df = ensure_hourly_index(df_in, method_fill=fill_method)
     n_rows = len(df)
+    if n_rows <= 0:
+        raise ValueError("No rows after ensuring hourly index")
 
-    # Keep only lags that are strictly smaller than available rows
-    valid_lags = [lag for lag in lags if lag < n_rows]
-    if len(valid_lags) < len(lags):
-        logger.warning("Requested lags %s trimmed to valid lags %s due to limited series length (%d rows)",
-                       lags, valid_lags, n_rows)
+    # Choose valid lags but ensure at least `min_train_rows` remain after dropping max_lag
+    requested_lags = sorted(set(lags))
+    valid_lags = [lag for lag in requested_lags if lag < n_rows]  # initial filter
 
-    # Create lag features (empty list -> no lag columns created)
+    # Trim largest lags until (n_rows - max_lag) >= min_train_rows or no more lags
+    while valid_lags:
+        max_lag = max(valid_lags)
+        if (n_rows - max_lag) >= min_train_rows:
+            break
+        # remove the largest lag and retry
+        removed = valid_lags.pop(-1)
+        logger.warning("Trimmed lag %d because not enough rows (%d) to keep min_train_rows=%d", removed, n_rows, min_train_rows)
+
+    # If no valid lags left, pick a safe default
+    if not valid_lags:
+        fallback = [1, 24]
+        valid_lags = [lag for lag in fallback if lag < n_rows]
+        logger.warning("No valid requested lags left; falling back to %s (valid: %s)", fallback, valid_lags)
+
+    logger.info("Using valid_lags=%s with n_rows=%d", valid_lags, n_rows)
+
     df = create_lag_features(df, value_col=value_col, lags=valid_lags if valid_lags else [])
     df = create_rolling_features(df, value_col=value_col, windows=rolling_windows)
     df = add_time_features(df)
 
-    # Deterministic trimming: drop the first max_lag rows (they cannot have full lag history)
+    # Deterministic trimming: drop first max_lag rows (if any)
     if valid_lags:
         max_lag = max(valid_lags)
         if n_rows > max_lag:
-            logger.info("Dropping first %d rows to remove incomplete lag features", max_lag)
             df = df.iloc[max_lag:].reset_index(drop=True)
-        else:
-            # shouldn't happen because valid_lags filtered, but keep safe fallback
-            logger.info("n_rows <= max_lag, keeping all rows (no drop applied)")
-            df = df.reset_index(drop=True)
+            logger.info("Dropped first %d rows (max_lag) keeping %d rows for training", max_lag, len(df))
     else:
-        logger.info("No valid lag columns available (series too short). Keeping all rows after feature creation.")
         df = df.reset_index(drop=True)
-
     return df
