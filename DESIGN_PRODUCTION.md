@@ -63,6 +63,7 @@ flowchart LR
     I --> U[Model lineage & audit (MLflow)]
     H --> V[Model evaluation reports (Artifact store)]
   end
+```
 
 Component details & responsibilities
 1. Ingestion & storage
