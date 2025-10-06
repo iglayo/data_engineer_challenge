@@ -36,7 +36,7 @@ The focus is on a **simple, pragmatic stack** that a single engineer can impleme
 ## Simplified architecture diagram
 
 ```mermaid
-flowchart LR
+flowchart LR;
   A[ESIOS API] -->|HTTP| B[run_pipeline.py]
   B --> C[data/raw/*.parquet]
   C --> D[scripts/process_features.py]
