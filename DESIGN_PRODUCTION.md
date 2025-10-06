@@ -1,68 +1,49 @@
-# Production Design: Forecasting Workflow for T+1..T+6 Demand (Technical Design)
+# Production Design (MVP-focused): Forecasting Workflow for T+1..T+6
 
 **Author:** Ignacio Layo González  
-**Context:** Builds on the Exercise 1 MVP (ETL → hourly features → RandomForest → recursive T+1..T+6 forecasts).  
-**Target:** Production-grade, automated, secure, observable pipeline suitable for integration into a trading team’s systems.
+**Context:** Technical design proposal for deploying the forecasting pipeline (Exercise 1) into a realistic, maintainable, and scalable production setup.
 
 ---
 
-## Executive summary (short)
-This document describes a cloud architecture and operational design to convert the local MVP into a production service that:
-- Ingests streaming and batch market data (ESIOS, telemetry),
-- Produces hourly forecasts for the next 6 hours from the last observed data point (T),
-- Serves predictions to downstream trading applications via secure, low-latency interfaces,
-- Enables automated retraining, model governance, monitoring (data & model drift), and reproducible deployments.
+## Executive summary
 
-Platform choice: **Microsoft Azure** (matches team competence: Databricks / Azure ML / Event Hubs / AKS). The design is modular and can be adapted to AWS/GCP.
+This document outlines how the forecasting pipeline developed in Exercise 1 could evolve into a production-ready system.  
+The focus is on a **simple, pragmatic stack** that a single engineer can implement and maintain, while also showing how it could grow into a more advanced architecture if the project scales.
 
 ---
 
-## High-level architecture
+## MVP (Single-engineer, defendable stack)
+
+**Goal:** Reproducible pipeline that produces T+1..T+6 hourly forecasts from the last ESIOS datapoint (T).
+
+### Core components
+- **Ingestion:** `run_pipeline.py` pulls ESIOS API data (HTTP request) and stores raw parquet files in `data/raw/`.  
+- **Feature engineering:** `scripts/process_features.py` converts 5-min readings to hourly averages, adds lag and rolling features.  
+- **Model training & prediction:** `src/model.py` (scikit-learn RandomForest) trains on past data and recursively predicts the next 6 hours.  
+- **Prediction storage:** parquet files in `data/predictions/` (or a lightweight Postgres DB for serving).  
+- **Serving:** small REST API using **FastAPI** that exposes the latest predictions for the trading application.  
+- **CI / reproducibility:** GitHub repository with unit tests, optionally integrated with GitHub Actions.  
+- **Deployment:** packaged as a Docker image, runnable locally or on a simple VM / Azure App Service.
+
+### Why this stack
+- Fully reproducible and realistic for a single engineer.  
+- Pure Python; no dependency on heavy cloud services.  
+- Easy to explain and maintain.  
+- Can later integrate naturally with standard cloud tools if required.
+
+---
+
+## Simplified architecture diagram
 
 ```mermaid
 flowchart LR
-  subgraph Ingest & Storage
-    A[ESIOS API / external feeds] -->|HTTP / Pull| B[Azure Data Factory / Functions]
-    A --> |Event Stream| C[Event Hubs / Kafka]
-    B --> D[Raw storage (Azure Data Lake Storage / Delta Lake)]
-    C --> D
-  end
-
-  subgraph Processing & Feature Store
-    D --> E[Azure Databricks (Spark) Delta Lake]
-    E --> F[Feature engineering & materialize hourly view]
-    F --> G[Feature Store (Delta + MLflow/Feast)]
-    G --> H[Training jobs (Databricks or AzureML)]
-  end
-
-  subgraph Model Registry & Serving
-    H --> I[MLflow Model Registry / Azure ML Model Registry]
-    I --> J[Model CI/CD (GitHub Actions / Azure DevOps)]
-    J --> K[Model Serving: AKS + KFServing / Azure ML Endpoint]
-  end
-
-  subgraph Orchestration & Automation
-    L[Azure Data Factory / Azure Pipelines] --> E
-    L --> H
-    L --> M[Trigger: retrain on drift or schedule]
-  end
-
-  subgraph Serving & Consumers
-    K --> N[API Gateway / Azure API Management]
-    N --> O[Trading App (internal) via secured REST]
-    K --> P[Predictions storage (Azure SQL / Cosmos / Delta)]
-    P --> O
-    K --> Q[Message queue: Azure Service Bus / Event Grid]
-    Q --> O
-  end
-
-  subgraph Observability & Governance
-    Datasets[(Delta + Parquet versions)] ---|catalog| R[Data Catalog / Purview]
-    All --> S[Application Insights / Log Analytics]
-    S --> T[Grafana / PowerBI dashboards]
-    I --> U[Model lineage & audit (MLflow)]
-    H --> V[Model evaluation reports (Artifact store)]
-  end
+  A[ESIOS API] -->|HTTP| B[run_pipeline.py]
+  B --> C[data/raw/*.parquet]
+  C --> D[scripts/process_features.py]
+  D --> E[data/processed/features_*.parquet]
+  E --> F[src/model.py (train + predict)]
+  F --> G[data/predictions/predictions_*.parquet]
+  G --> H[FastAPI endpoint] --> I[Trading App]
 ```
 
 Component details & responsibilities
