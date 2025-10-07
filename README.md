@@ -35,6 +35,7 @@ This repo contains the extraction (ETL), preprocessing, feature pipeline, traini
 ```bash
 git clone https://github.com/iglayo/data_engineer_challenge.git
 cd axpo_data_engineer_challenge
+```
 
 2. Create and activate virtual environment (recommended):
 Windows (PowerShell):
@@ -49,7 +50,7 @@ $Env:ESIOS_API_KEY="token in here"
 
 ---
 
-## Cómo ejecutar
+## How to run
 PowerShell
 1. Extract data from ESIOS export to parquet format, running:
 python run_pipeline.py
