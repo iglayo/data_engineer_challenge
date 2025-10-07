@@ -36,23 +36,23 @@ flowchart LR
 
 ## 3. Main components
 
-### 🔹 Ingestion
+###  Ingestion
 - An **Azure Function** (or simple cron job) runs `etl.py` every hour.  
 - It downloads data from ESIOS and saves it as **Parquet** in an **Azure Blob Storage** container (`/data/raw/`).  
 - The ESIOS API token is managed securely using **Azure Key Vault** or environment variables.  
 - Logs are written for each run, including success/failure and HTTP response status.
 
-### 🔹 Processing and feature generation
+###  Processing and feature generation
 - A second job runs `process_features.py` in **Azure Databricks** or on a **lightweight Python VM**.  
 - It aggregates the data to hourly resolution and creates lag, rolling, and time features.  
 - The processed data is stored in `/data/processed/` within the same Blob container.
 
-### 🔹 Model training and tracking
+###  Model training and tracking
 - A daily or weekly job trains a new model (`model.py`) with the latest processed features.  
 - The trained model is saved with `joblib`, versioned by date or iteration.  
 - Optionally, **MLflow** (in Databricks or local) is used to log metrics and model versions.
 
-### 🔹 Predictions
+###  Predictions
 - Each hour, once the new features are ready, the model runs a T+6 forecast using `make_recursive_forecast()`.  
 - Predictions are stored as Parquet in `/data/predictions/`.  
 - These files are directly accessible by the Trading team or through a small internal API.
