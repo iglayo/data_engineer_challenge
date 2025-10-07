@@ -55,7 +55,7 @@ PowerShell
 1. Extract data from ESIOS export to parquet format, running:
 python run_pipeline.py
 Downloads the last 21 days of demand and normalizes dates to UTC
-Save the file to data/raw/1293_YYYY-MM-DD_YYYY-MM-DD.parquet, from the root of the project
+Saves the file to data/raw/1293_YYYY-MM-DD_YYYY-MM-DD.parquet, from the root of the project
 If there is no API key or the API fails, it will attempt to load data/example_1293.csv
 
 2. Generate time features
@@ -96,7 +96,7 @@ prediction: Predicted value.
 
 ### Technical Decisions
 
-The raw data file with data each5 minutes is kept for traceability and future experimentation. This allows for a higher-resolution model to be developed in the future (the current one has hourly resolution).
+The raw data file with data each 5 minutes is kept for traceability and future experimentation. This allows for a higher-resolution model to be developed in the future (the current one has hourly resolution).
 It is trained using an hourly view (hourly average): this maintains consistency with the lags, and the model is consistent with the training data.
 Predictions are made from T, the latest ESIOS datapoint.
 A Random Forest is used as a model for its application in time series.
