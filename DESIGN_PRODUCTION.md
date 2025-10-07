@@ -1,227 +1,138 @@
-# Production Design (MVP-focused): Forecasting Workflow for T+1..T+6
+# Exercise 2 – Production Deployment Design
 
 **Author:** Ignacio Layo González  
 **Context:** Technical design proposal for deploying the forecasting pipeline (Exercise 1) into a realistic, maintainable, and scalable production setup.
 
----
+## 1. Objective
 
-## Executive summary
+This document explains how to bring the MVP developed in **Exercise 1** into production.  
+The current version runs locally: it fetches data from the ESIOS API, builds time-based features, and trains and applies a Random Forest model.
 
-This document outlines how the forecasting pipeline developed in Exercise 1 could evolve into a production-ready system.  
-The focus is on a **simple, pragmatic stack** that a single engineer can implement and maintain, while also showing how it could grow into a more advanced architecture if the project scales.
-
----
-
-## MVP (Single-engineer, defendable stack)
-
-**Goal:** Reproducible pipeline that produces T+1..T+6 hourly forecasts from the last ESIOS datapoint (T).
-
-### Core components
-- **Ingestion:** `run_pipeline.py` pulls ESIOS API data (HTTP request) and stores raw parquet files in `data/raw/`.  
-- **Feature engineering:** `scripts/process_features.py` converts 5-min readings to hourly averages, adds lag and rolling features.  
-- **Model training & prediction:** `src/model.py` (scikit-learn RandomForest) trains on past data and recursively predicts the next 6 hours.  
-- **Prediction storage:** parquet files in `data/predictions/` (or a lightweight Postgres DB for serving).  
-- **Serving:** small REST API using **FastAPI** that exposes the latest predictions for the trading application.  
-- **CI / reproducibility:** GitHub repository with unit tests, optionally integrated with GitHub Actions.  
-- **Deployment:** packaged as a Docker image, runnable locally or on a simple VM / Azure App Service.
-
-### Why this stack
-- Fully reproducible and realistic for a single engineer.  
-- Pure Python; no dependency on heavy cloud services.  
-- Easy to explain and maintain.  
-- Can later integrate naturally with standard cloud tools if required.
+The goal is to transform that code into a **reliable, automated data pipeline** running in the cloud (Azure), ensuring traceability, reproducibility, and maintainability.
 
 ---
 
-## Simplified architecture diagram
+## 2. General approach
+
+The idea is to keep the same logic from the existing scripts (`etl.py`, `process_features.py`, `run_model.py`) but run them in an orchestrated and automated way in the cloud, with shared storage and job scheduling.
+
+The overall pipeline flow would be:
 
 ```mermaid
-flowchart LR;
-  A[ESIOS API] -->|HTTP| B[run_pipeline.py]
-  B --> C[data/raw/*.parquet]
-  C --> D[scripts/process_features.py]
-  D --> E[data/processed/features_*.parquet]
-  E --> F[src/model.py (train + predict)]
-  F --> G[data/predictions/predictions_*.parquet]
-  G --> H[FastAPI endpoint] --> I[Trading App]
+flowchart LR
+    A(ESIOS API) --> B("Scheduled ingestion
+    (Azure Function)")
+    B --> C("Cloud Storage
+    (Azure Blob)")
+    C --> D("Processing
+    (Databricks)")
+    D --> E("Training and
+    automatic predictions")
+    E --> F(Store predictions
+    and internal API access)
 ```
 
-Component details & responsibilities
-1. Ingestion & storage
+---
 
-Azure Data Factory (ADF) / Azure Functions: scheduled pulls from ESIOS (HTTP) and backups; small functions handle token rotation and retries.
+## 3. Main components
 
-Event Hubs (or Kafka): ingest streaming sources (telemetry, market changes) for lower-latency updates.
+### 🔹 Ingestion
+- An **Azure Function** (or simple cron job) runs `etl.py` every hour.  
+- It downloads data from ESIOS and saves it as **Parquet** in an **Azure Blob Storage** container (`/data/raw/`).  
+- The ESIOS API token is managed securely using **Azure Key Vault** or environment variables.  
+- Logs are written for each run, including success/failure and HTTP response status.
 
-Azure Data Lake Storage (ADLS Gen2) + Delta Lake: raw immutable storage for traceability. Use partitioning by date and indicator ID.
+### 🔹 Processing and feature generation
+- A second job runs `process_features.py` in **Azure Databricks** or on a **lightweight Python VM**.  
+- It aggregates the data to hourly resolution and creates lag, rolling, and time features.  
+- The processed data is stored in `/data/processed/` within the same Blob container.
 
-2. Processing, features & storage
+### 🔹 Model training and tracking
+- A daily or weekly job trains a new model (`model.py`) with the latest processed features.  
+- The trained model is saved with `joblib`, versioned by date or iteration.  
+- Optionally, **MLflow** (in Databricks or local) is used to log metrics and model versions.
 
-Azure Databricks (Spark + Delta):
+### 🔹 Predictions
+- Each hour, once the new features are ready, the model runs a T+6 forecast using `make_recursive_forecast()`.  
+- Predictions are stored as Parquet in `/data/predictions/`.  
+- These files are directly accessible by the Trading team or through a small internal API.
 
-Batch jobs: resample raw 5-minute data to hourly, imputations, generate lags & rolling stats, enrich with calendar features.
+---
 
-Job outputs: materialized hourly view and features Delta tables (time-partitioned).
+## 4. Orchestration and automation
 
-Feature Store:
+Depending on the environment maturity, we can rely on different options:
 
-Use Delta as canonical store and optionally integrate Feast or Databricks Feature Store for online lookups.
+### 🟢 Simple: **Azure Functions + Cron Jobs** - Lightweight, cost-effective setup using scheduled scripts.
+### 🟡 Intermediate: **Azure Data Factory** - Visual orchestration and monitoring of all pipeline steps.
+### 🔵 Advanced: **Databricks Workflows** - Full orchestration within Databricks with metrics and alerts.
 
-Persist feature metadata and freshness timestamps.
+Each stage (ingest → features → predictions) becomes an independent **job** with clear dependencies and retry policies.
 
-3. Training & model management
+---
 
-Databricks / AzureML training jobs:
+## 5. CI/CD and version control
 
-Parameterized notebooks (or job tasks) that read features from Delta, train model, evaluate, log metrics.
+To ensure code quality and repeatable deployments:
 
-Persist model artifacts and metrics to MLflow (model registry) and store artifacts in blob storage.
+- **GitHub repository** with `main` and `dev` branches.  
+- **GitHub Actions** runs:
+  - Unit tests (`pytest`) for `etl.py`, `process_features.py`, `run_model.py`.  
+  - Linting (`flake8`) for consistent style.
+- Upon merging to `main`, the CI/CD workflow updates scheduled jobs in Azure or Databricks.
+- Each trained model is versioned and linked to the corresponding Git commit hash.
 
-Model registry / governance:
+---
 
-MLflow or Azure ML Model Registry to track versions, stage (staging/production), and lineage (dataset version, hyperparameters).
+## 6. Security and configuration
 
-Automated model tests (smoke tests, performance gates).
+- Secrets such as the ESIOS API key are stored in **Azure Key Vault** or secure environment variables.
+- No credentials are stored in the repository.
+- Storage access follows the principle of least privilege.
+- Logs are centralized (log files or Azure Monitor), and alert notifications can be sent via email or Teams.
 
-4. Serving predictions
+---
 
-Online serving (low-latency):
+## 7. Monitoring and maintenance
 
-Deploy model as a REST endpoint on AKS using KServe / KFServing or Azure ML real-time endpoints.
+- **Automatic logs** for ingestion, feature generation, and model training.  
+- **Alerts** when:
+  - A job fails or runs longer than expected.
+  - Model performance degrades (for example, MAE increases by >20%).
+- **Basic metrics** displayed in a lightweight dashboard (Azure Monitor or Streamlit):
+  - Latest available timestamp.
+  - Mean Absolute Error (MAE).
+  - Job duration and success rate.
 
-Alternatively, use Azure Functions for lightweight models, but prefer AKS for autoscaling and more complex inference.
+---
 
-Batch predictions & storage:
+## 8. Data pipeline summary
 
-Orchestrated scheduled predictions (e.g., every time new data at T arrives).
+| Step | Script / Component | Frequency | Output |
+|------|--------------------|------------|---------|
+| Ingestion | `etl.py` | Hourly | Raw Parquet files (`data/raw/`) |
+| Processing | `process_features.py` | Hourly | Processed features (`data/processed/`) |
+| Training | `train_model.py` | Daily / Weekly | Versioned model (`.joblib`) |
+| Forecasting | `run_model.py` (forecast) | Hourly | Predictions (`data/predictions/`) |
 
-Write predictions to:
+---
 
-Delta table for historical retention,
+## 9. Future improvements
 
-Azure SQL / Cosmos (for trading app queries),
+- Add **integration tests** covering the full data pipeline.  
+- Implement **data drift monitoring** to detect model degradation.  
+- Automate model promotion based on performance metrics.
 
-or push via Service Bus / Event Grid to the trading system.
+---
 
-API:
+## 10. Conclusion
 
-Azure API Management in front of model endpoints: enforce authentication (Azure AD), rate limiting, discovery for trading app.
+This design brings the MVP from Exercise 1 into a **lightweight production setup**, using:
+- The same Python scripts already implemented.  
+- Cloud storage (Azure Blob).  
+- Simple scheduling (Azure Functions or Databricks Jobs).  
+- Logging, versioning, and monitoring.
 
-5. Consumer integration (Trading app)
+The result is an automated, hourly prediction pipeline that supports the Trading team with minimal operational overhead and clear paths for future improvement.
 
-Two integration patterns:
-
-Pull: Trading app calls REST endpoint (API Management) to fetch predictions for desired horizon.
-
-Push: Pipeline publishes predictions to Service Bus / Event Grid or writes to DB; trading app subscribes for updates.
-
-Prefer push for deterministic delivery or database integration for historical queries.
-
-6. Orchestration & automation
-
-Azure Data Factory / Azure Pipelines / GitHub Actions:
-
-Orchestrate ETL → features → train → evaluate → register → serve.
-
-Retrain triggered by schedule, by drift detection event, or by manual approval.
-
-Infrastructure as Code: Terraform or Bicep for reproducible infrastructure.
-
-7. Monitoring, observability & drift detection
-
-Application Insights / Log Analytics: monitor pipeline logs, latency, failures.
-
-Prometheus + Grafana (or Azure Monitor + PowerBI): visualize metrics — throughput, latency, model response time, error rates.
-
-Model health:
-
-Track prediction and feature distributions.
-
-Implement data-drift and concept-drift detectors (e.g., KS test vs. training baseline).
-
-Automatic alerting (PagerDuty / Teams / Slack) when drift crosses thresholds.
-
-Evaluation: store ground-truth when available; compute backfilled MAE/RMSE and attach to model runs.
-
-8. Security & compliance
-
-Key Vault: manage secrets (API keys, DB credentials).
-
-Managed Identities: for services to avoid plain secrets in code.
-
-Network isolation: private endpoints for storage and compute; RBAC for resource access.
-
-Audit & lineage: tracked via MLflow and Purview / Data Catalog.
-
-Dataflow (stepwise)
-
-ETL: Scheduled Data Factory job pulls ESIOS → raw Delta in ADLS.
-
-Aggregate: Databricks job resamples to hourly view and writes features table.
-
-Train: Triggered by schedule or drift; reads features, trains model, logs to MLflow.
-
-Register: If metrics pass, model promoted to staging/production in MLflow registry.
-
-Deploy: CI pipeline (GitHub Actions) builds container, pushes to ACR, deploys to AKS endpoint.
-
-Predict: On new data arrival, model produces T+1..T+6 forecasts → DB + message event.
-
-Consume: Trading app reads DB or subscribes to events; API Management enforces auth.
-
-Non-functional requirements & design trade-offs
-
-Latency: predictions available within minutes after T (batch hourly + AKS serving).
-
-Reliability: Delta Lake + retry logic in Data Factory + AKS autoscaling ensure robustness.
-
-Reproducibility: dataset and environment versions logged in MLflow and infra code.
-
-Cost: optimize Databricks clusters and AKS instances; use spot instances for training jobs.
-
-Operational runbook (summary)
-
-Deploy: CI pipeline provisions infrastructure (Terraform) → deploys model container.
-
-Monitor: dashboards display metrics; alerts for job or drift anomalies.
-
-Rollback: MLflow registry enables reverting to previous model versions.
-
-Incident response: if service down, trading app falls back to last stored predictions.
-
-Roadmap / priority list (for delivering production)
-Essential (MVP → Production-ready)
-
-Automated ETL to ADLS + hourly feature materialization.
-
-MLflow tracking + model registry.
-
-Containerized model endpoint with API Management and authentication.
-
-Prediction storage and a simple DB or message queue for the trading app.
-
-Important (observability & reliability)
-
-Monitoring dashboards, alerting, data drift detection.
-
-Infrastructure as Code (Terraform / Bicep).
-
-Nice-to-have (scale & governance)
-
-Feature Store for online lookups (Feast / Databricks FS).
-
-Multi-output direct forecasting models; online learning.
-
-MLflow/Databricks integration for scheduled retraining and automatic promotion.
-
-Appendix: Minimal infra pieces to prototype quickly
-
-ADLS Gen2 storage + Delta tables.
-
-Databricks (small job cluster) for feature generation.
-
-GitHub Actions for CI: run unit tests and build model container.
-
-AKS with Horizontal Pod Autoscaler for serving.
-
-API Management + Azure AD for secure access.
+---
